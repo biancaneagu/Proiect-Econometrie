@@ -1,0 +1,114 @@
+# =========================================================================
+# CERINȚA 5: REGULARIZARE (RIDGE & LASSO) ȘI SELECȚIE VARIABILE (BORUTA)
+# =========================================================================
+install.packages("glmnet", dependencies = TRUE)
+install.packages("Boruta", dependencies = TRUE)
+library(glmnet)
+library(Boruta)
+
+# 1. PREGĂTIREA DATELOR PENTRU GLMNET (Matrice, nu Dataframe)
+# glmnet are nevoie de matrice numerice pentru X și vector pentru Y
+
+# Definim X și Y pentru Antrenare
+x_train <- data.matrix(train_data[, c("Sleep_Duration", "Daily_Screen_Time", "Caffeine_Intake", 
+                                      "Age", "DummyGenderF", "DummyVegan", "DummyExerciseHigh")])
+y_train <- train_data$Cognitive_Score
+
+# Definim X și Y pentru Testare
+x_test <- data.matrix(test_data[, c("Sleep_Duration", "Daily_Screen_Time", "Caffeine_Intake", 
+                                    "Age", "DummyGenderF", "DummyVegan", "DummyExerciseHigh")])
+y_test <- test_data$Cognitive_Score
+
+# -------------------------------------------------------------------------
+# A. REGRESIA RIDGE (Alpha = 0)
+# -------------------------------------------------------------------------
+cat("\n--- A. Antrenare Model RIDGE ---\n")
+
+# Găsim cel mai bun Lambda prin Cross-Validation
+set.seed(123)
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0)
+best_lambda_ridge <- cv_ridge$lambda.min
+
+cat("Cel mai bun Lambda pentru Ridge:", best_lambda_ridge, "\n")
+
+# Antrenăm modelul final Ridge
+model_ridge <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda_ridge)
+
+# Predicții pe Test
+pred_ridge <- predict(model_ridge, s = best_lambda_ridge, newx = x_test)
+
+# Calculăm Erorile Ridge
+rmse_ridge <- RMSE(pred_ridge, y_test)
+r2_ridge   <- R2_Score(pred_ridge, y_test)
+
+# -------------------------------------------------------------------------
+# B. REGRESIA LASSO (Alpha = 1)
+# -------------------------------------------------------------------------
+cat("\n--- B. Antrenare Model LASSO ---\n")
+
+# Găsim cel mai bun Lambda
+set.seed(123)
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1)
+best_lambda_lasso <- cv_lasso$lambda.min
+
+cat("Cel mai bun Lambda pentru Lasso:", best_lambda_lasso, "\n")
+
+# Antrenăm modelul final Lasso
+model_lasso <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda_lasso)
+
+# Vizualizare: Cum Lasso elimină variabilele (Coeficienții devin 0)
+plot(cv_lasso)
+
+# Predicții pe Test
+pred_lasso <- predict(model_lasso, s = best_lambda_lasso, newx = x_test)
+
+# Calculăm Erorile Lasso
+rmse_lasso <- RMSE(pred_lasso, y_test)
+r2_lasso   <- R2_Score(pred_lasso, y_test)
+
+# Afișăm coeficienții Lasso (să vedem dacă a eliminat ceva)
+cat("\nCoeficienții LASSO (Dacă e . înseamnă că variabila a fost eliminată):\n")
+print(coef(model_lasso))
+
+# -------------------------------------------------------------------------
+# C. ALGORITMUL BORUTA (Selecția Variabilelor Importante)
+# -------------------------------------------------------------------------
+cat("\n--- C. Analiza Importanței Variabilelor (BORUTA) ---\n")
+# Boruta face mai multe rulări de Random Forest pentru a vedea ce contează cu adevărat
+
+set.seed(123)
+# Rulăm pe un eșantion din Train (dacă e prea mare, durează mult)
+# Dacă ai un PC bun, poți lăsa tot train_data. Dacă nu, ia un sample.
+boruta_sample <- train_data[sample(1:nrow(train_data), min(2000, nrow(train_data))), ]
+
+boruta_output <- Boruta(Cognitive_Score ~ ., data = boruta_sample, doTrace = 0)
+
+# Rezultatul final
+print(boruta_output)
+
+# Grafic cu importanța variabilelor
+plot(boruta_output, xlab = "", xaxt = "n", main = "Importanța Variabilelor conform Boruta")
+lz <- lapply(1:ncol(boruta_output$ImpHistory), function(i)
+  boruta_output$ImpHistory[is.finite(boruta_output$ImpHistory[,i]),i])
+axis(1, at=c(1:ncol(boruta_output$ImpHistory)), labels=colnames(boruta_output$ImpHistory), las=2, cex.axis=0.7)
+
+
+# -------------------------------------------------------------------------
+# D. TABEL COMPARATIV FINAL (OLS vs RIDGE vs LASSO) - Cerința 5.b
+# -------------------------------------------------------------------------
+
+# Luăm erorile OLS calculate anterior
+rmse_ols <- RMSE(pred_test, test_data$Cognitive_Score)
+r2_ols   <- R2_Score(pred_test, test_data$Cognitive_Score)
+
+comparison_df <- data.frame(
+  Model = c("OLS Clasic", "Ridge (L2)", "Lasso (L1)"),
+  RMSE_Test = c(rmse_ols, rmse_ridge, rmse_lasso),
+  R2_Test = c(r2_ols, r2_ridge, r2_lasso)
+)
+
+cat("\n=======================================================\n")
+cat(" CLASAMENT FINAL: CINE PREZICE MAI BINE?\n")
+cat("=======================================================\n")
+print(comparison_df)
+cat("=======================================================\n")
