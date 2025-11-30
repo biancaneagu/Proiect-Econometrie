@@ -1,0 +1,432 @@
+############################################################################
+# PROIECT ECONOMETRIE - APLICAȚIA 1 (VARIANTA COGNITIVE SCORE)
+############################################################################
+
+rm(list = ls())
+
+
+PackageNames <- c("tidyverse", "stargazer", "magrittr", "lmtest", "sandwich", 
+                  "olsrr", "moments", "ggplot2", "tseries", "car", "caret", 
+                  "MLmetrics", "factoextra", "cluster", "corrplot")
+
+for(i in PackageNames){
+  if(!require(i, character.only = T)){
+    install.packages(i, dependencies = T)
+    require(i, character.only = T)
+  }
+}
+
+
+raw_data <- read.csv("human_cognitive_performance.csv", header = TRUE)
+df <- raw_data
+
+getwd()
+
+
+
+# Variabilele  Dummy
+df %<>% mutate(DummyGenderF = ifelse(Gender == "Female", 1, 0))
+df %<>% mutate(DummyVegan = ifelse(Diet_Type == "Vegan", 1, 0))
+df %<>% mutate(DummyExerciseHigh = ifelse(Exercise_Frequency == "High", 1, 0))
+
+df_final <- df %>% 
+  dplyr::select(Cognitive_Score,     #Y
+                Sleep_Duration,      
+                Daily_Screen_Time,   
+                Caffeine_Intake,     
+                Age,                 
+                DummyGenderF, DummyVegan, DummyExerciseHigh)
+
+df_final <- na.omit(df_final)
+
+# Staticstici descriptive 
+stargazer(df_final, type = "text", title = "Statistici Descriptive")
+
+# Histograma Y
+ggplot(df_final, aes(x = Cognitive_Score)) +
+  geom_histogram(fill = "forestgreen", color = "white", bins = 15) +
+  theme_minimal() + ggtitle("Distribuția Scorului Cognitiv")
+
+# regresia simpla 
+model1 <- lm(Cognitive_Score ~ Daily_Screen_Time, data = df_final)
+summary_model <- summary(model1)
+print(summary_model)
+
+
+#testul t intre cogn score si var dummy de sport
+# Sintaxa este: variabila_numerica ~ variabila_grup (binara)
+t.test(Cognitive_Score ~ DummyExerciseHigh, data = df_final)
+
+#test pearson intre cogn score si daily screen time 
+cor.test(df_final$Cognitive_Score, df_final$Daily_Screen_Time)
+
+# Matrice de Corelație
+cor_matrix <- cor(df_final)
+corrplot(cor_matrix, method = "number", type = "upper", tl.cex = 0.7)
+
+
+
+# TRAIN / TEST SPLIT
+set.seed(123)
+# Atenție: împărțim pe baza Cognitive_Score acum
+train_idx <- createDataPartition(df_final$Cognitive_Score, p = 0.8, list = FALSE)
+train_data <- df_final[train_idx, ]
+test_data  <- df_final[-train_idx, ]
+
+# --- 6. MODELARE OLS (Y = Cognitive_Score) ---
+model_ols <- lm(Cognitive_Score ~ Sleep_Duration + Daily_Screen_Time + Caffeine_Intake + 
+                  Age + DummyGenderF + DummyVegan + DummyExerciseHigh, 
+                data = train_data)
+
+# Rezultate
+stargazer(model_ols, type = "text", title = "Regresie: Determinanții Performanței Cognitive")
+
+
+
+
+
+# =========================================================================
+#  VALIDARE ȘI PREDICȚIE 
+# =========================================================================
+
+# 1. TESTE DE DIAGNOSTIC (Validarea ipotezelor)
+# Verificăm dacă variabilele sunt prea corelate între ele - testul vif
+vif_vals <- vif(model_ols)
+print(vif_vals)
+if(max(vif_vals) < 5) cat("Verdict: OK (Nu avem multicoliniaritate severă)\n")
+
+cat("\n2. Testul Breusch-Pagan (Homoscedasticitate)\n")
+# H0: Erorile sunt constante (Homoscedasticitate)
+# H1: Erorile sunt variabile (Heteroscedasticitate)
+bp_test <- bptest(model_ols)
+print(bp_test)
+
+
+p_val_bp <- bp_test$p.value
+
+if(p_val_bp > 0.05) {
+  cat("Concluzie: P-value > 0.05. Nu se respinge ipoteza nula (avem Homoscedasticitate).\n")
+} else {
+  cat("Concluzie: P-value < 0.05. Se respinge ipoteza nula (avem Heteroscedasticitate).\n")
+}
+
+# --- CORECȚIE PENTRU HETEROSCEDASTICITATE ---
+# Folosim estimatori robuști (Sandwich Estimator - HC1)
+# Asta va ajusta "steluțele" și erorile standard, păstrând coeficienții la fel.
+
+library(lmtest)
+library(sandwich)
+
+# Recalculăm tabelul de coeficienți cu erori robuste
+model_robust <- coeftest(model_ols, vcov = vcovHC(model_ols, type = "HC1"))
+print(model_robust)
+
+
+
+
+cat("\3. Testul Jarque-Bera (Normalitate Reziduuri)\n")
+# H0: Reziduurile sunt distribuite normal
+resid_vals <- residuals(model_ols)
+jb_test <- jarque.bera.test(resid_vals)
+print(jb_test)
+
+
+p_val_jb <- jb_test$p.value
+
+if(p_val_jb > 0.05) {
+  cat("Concluzie: P-value > 0.05. Nu se respinge ipoteza nula (avem reziduuri normale).\n")
+} else {
+  cat("Concluzie: P-value < 0.05. Se respinge ipoteza nula (avem reziduuri anormale).\n")
+}
+
+#histograma reziduurilor - pt a arata distributia normala a reziduriilor
+#intrucat testul jb poate pica avand in vedere nr mare de observatii
+
+hist(resid_vals, breaks = 50, probability = TRUE, 
+     main = "Histograma Reziduurilor", 
+     xlab = "Reziduuri", col = "lightblue")
+# Adaugam curba normala teoretica peste histograma
+curve(dnorm(x, mean = mean(resid_vals), sd = sd(resid_vals)), 
+      col = "red", lwd = 2, add = TRUE)
+
+
+
+
+
+cat(" 4. Testul Durbin-Watson (Autocorelare) \n")
+# Valori intre 1.8 si 2.2 sunt ideale.
+dw_test <- dwtest(model_ols)
+print(dw_test)
+
+
+
+
+# =========================================================================
+# 3.c EVALUAREA CAPACITĂȚII PREDICTIVE (Cerința 3.c) 
+# =========================================================================
+
+# 1. Facem predicții pe setul de TEST (date pe care modelul nu le-a văzut)
+pred_test <- predict(model_ols, newdata = test_data)
+
+# 2. Definim o funcție sigură pentru MAPE (evită împărțirea la zero)
+# Dacă valoarea reală e 0, o tratăm ca 0.01 pentru a putea face calculul matematic.
+calculate_safe_mape <- function(actual, pred){
+  # Formula: media diferenței absolute procentuale
+  mean(abs((actual - pred) / pmax(actual, 0.01))) * 100
+}
+
+# 3. Calculăm indicatorii de performanță
+# RMSE (Root Mean Squared Error) - penalizează erorile mari
+rmse_val <- RMSE(pred_test, test_data$Cognitive_Score)
+
+# MAE (Mean Absolute Error) - eroarea medie în puncte
+mae_val  <- MAE(pred_test, test_data$Cognitive_Score)
+
+# MAPE (Calculat cu funcția noastră sigură)
+mape_val <- calculate_safe_mape(test_data$Cognitive_Score, pred_test)
+
+# R2 pe setul de testare (Stabilitatea modelului)
+r2_test  <- R2_Score(pred_test, test_data$Cognitive_Score)
+
+# 4. Afișăm Raportul Final
+cat("\n=======================================================\n")
+cat(" RAPORT FINAL DE PERFORMANȚĂ (Set Testare - 20%)\n")
+cat("=======================================================\n")
+cat("RMSE (Eroarea Medie Pătratică):   ", round(rmse_val, 4), "puncte\n")
+cat("MAE  (Eroarea Medie Absolută):    ", round(mae_val, 4), "puncte\n")
+cat("MAPE (Eroarea Procentuală):       ", round(mape_val, 2), "%\n")
+cat("R2 Score (Pe date noi):           ", round(r2_test, 4), "\n")
+cat("-------------------------------------------------------\n")
+# Verificare Overfitting
+diff_r2 <- abs(summary(model_ols)$adj.r.squared - r2_test)
+if(diff_r2 < 0.05){
+  cat("CONCLUZIE: Modelul este ROBUST (Nu există Overfitting).\n")
+  cat("Diferența dintre R2 Train și R2 Test este mică:", round(diff_r2, 4), "\n")
+} else {
+  cat("CONCLUZIE: Există semne de Overfitting (Diferență mare între Train și Test).\n")
+}
+cat("=======================================================\n")
+
+
+
+# =========================================================================
+# CERINȚA 4: SCENARII DE PROGNOZĂ
+# =========================================================================
+
+# 1. Definim Profilurile Ipotetice
+scenarii <- data.frame(
+  Name = c("Studentul Ideal", "Studentul Extenuat"),
+  Sleep_Duration = c(9, 4),           # 9 ore vs 4 ore
+  Daily_Screen_Time = c(1, 10),       # 1 oră vs 10 ore
+  Caffeine_Intake = c(50, 400),       # 50mg vs 400mg
+  Age = c(22, 22),                    # Aceeași vârstă
+  DummyGenderF = c(0, 0),             # Ambii bărbați (pentru comparație)
+  DummyVegan = c(0, 0),               # Niciunul vegan
+  DummyExerciseHigh = c(1, 0)         # Unul face sport intens, celălalt nu
+)
+
+# 2. Facem Prognoza (cu Interval de Încredere 95%)
+prognoza <- predict(model_ols, newdata = scenarii, interval = "confidence", level = 0.95)
+
+# 3. Combinăm datele pentru afișare
+rezultat_scenarii <- cbind(scenarii[, c("Name", "Sleep_Duration", "Daily_Screen_Time", "DummyExerciseHigh")], prognoza)
+
+# 4. Afișăm Rezultatul
+cat("\n=======================================================\n")
+cat(" SCENARII DE PROGNOZĂ: CUM INFLUENȚEAZĂ STILUL DE VIAȚĂ?\n")
+cat("=======================================================\n")
+print(rezultat_scenarii)
+cat("-------------------------------------------------------\n")
+cat("Interpretare:\n")
+diff_score <- prognoza[1, "fit"] - prognoza[2, "fit"]
+cat("Diferența de scor cognitiv între stilul de viață sănătos și cel extenuat\n")
+cat("este de aproximativ:", round(diff_score, 2), "puncte.\n")
+cat("=======================================================\n")
+
+
+
+
+
+
+
+
+
+
+# =========================================================================
+# CERINȚA 5: REGULARIZARE (RIDGE & LASSO) ȘI SELECȚIE VARIABILE (BORUTA)
+# =========================================================================
+install.packages("glmnet", dependencies = TRUE)
+install.packages("Boruta", dependencies = TRUE)
+library(glmnet)
+library(Boruta)
+
+# 1. PREGĂTIREA DATELOR PENTRU GLMNET (Matrice, nu Dataframe)
+# glmnet are nevoie de matrice numerice pentru X și vector pentru Y
+
+# Definim X și Y pentru Antrenare
+x_train <- data.matrix(train_data[, c("Sleep_Duration", "Daily_Screen_Time", "Caffeine_Intake", 
+                                      "Age", "DummyGenderF", "DummyVegan", "DummyExerciseHigh")])
+y_train <- train_data$Cognitive_Score
+
+# Definim X și Y pentru Testare
+x_test <- data.matrix(test_data[, c("Sleep_Duration", "Daily_Screen_Time", "Caffeine_Intake", 
+                                    "Age", "DummyGenderF", "DummyVegan", "DummyExerciseHigh")])
+y_test <- test_data$Cognitive_Score
+
+# -------------------------------------------------------------------------
+# A. REGRESIA RIDGE (Alpha = 0)
+# -------------------------------------------------------------------------
+cat("\n--- A. Antrenare Model RIDGE ---\n")
+
+# Găsim cel mai bun Lambda prin Cross-Validation
+set.seed(123)
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0)
+best_lambda_ridge <- cv_ridge$lambda.min
+
+cat("Cel mai bun Lambda pentru Ridge:", best_lambda_ridge, "\n")
+
+# Antrenăm modelul final Ridge
+model_ridge <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda_ridge)
+
+# Predicții pe Test
+pred_ridge <- predict(model_ridge, s = best_lambda_ridge, newx = x_test)
+
+# Calculăm Erorile Ridge
+rmse_ridge <- RMSE(pred_ridge, y_test)
+r2_ridge   <- R2_Score(pred_ridge, y_test)
+
+
+#=========rez intermediare 
+cat("\n--- REZULTATE RIDGE (Intermediare) ---\n")
+cat("Lambda Optim (Penalizarea):", cv_ridge$lambda.min, "\n")
+cat("Ridge RMSE (Eroarea):      ", rmse_ridge, "\n")
+cat("Ridge R2 (Scorul):         ", r2_ridge, "\n")
+cat("--------------------------------------\n")
+
+
+# -------------------------------------------------------------------------
+# B. REGRESIA LASSO (Alpha = 1)
+# -------------------------------------------------------------------------
+cat("\n--- B. Antrenare Model LASSO ---\n")
+
+# Găsim cel mai bun Lambda
+set.seed(123)
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1)
+best_lambda_lasso <- cv_lasso$lambda.min
+
+cat("Cel mai bun Lambda pentru Lasso:", best_lambda_lasso, "\n")
+
+# Antrenăm modelul final Lasso
+model_lasso <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda_lasso)
+
+# Vizualizare: Cum Lasso elimină variabilele (Coeficienții devin 0)
+plot(cv_lasso)
+
+# Predicții pe Test
+pred_lasso <- predict(model_lasso, s = best_lambda_lasso, newx = x_test)
+
+# Calculăm Erorile Lasso
+rmse_lasso <- RMSE(pred_lasso, y_test)
+r2_lasso   <- R2_Score(pred_lasso, y_test)
+
+# Afișăm coeficienții Lasso (să vedem dacă a eliminat ceva)
+cat("\nCoeficienții LASSO (Dacă e . înseamnă că variabila a fost eliminată):\n")
+print(coef(model_lasso))
+
+# -------------------------------------------------------------------------
+# C. ALGORITMUL BORUTA (Selecția Variabilelor Importante)
+# -------------------------------------------------------------------------
+cat("\n--- C. Analiza Importanței Variabilelor (BORUTA) ---\n")
+# Boruta face mai multe rulări de Random Forest pentru a vedea ce contează cu adevărat
+
+set.seed(123)
+# Rulăm pe un eșantion din Train (dacă e prea mare, durează mult)
+# Dacă ai un PC bun, poți lăsa tot train_data. Dacă nu, ia un sample.
+boruta_sample <- train_data[sample(1:nrow(train_data), min(2000, nrow(train_data))), ]
+
+boruta_output <- Boruta(Cognitive_Score ~ ., data = boruta_sample, doTrace = 0)
+
+# Rezultatul final
+print(boruta_output)
+
+# Grafic cu importanța variabilelor
+plot(boruta_output, xlab = "", xaxt = "n", main = "Importanța Variabilelor conform Boruta")
+lz <- lapply(1:ncol(boruta_output$ImpHistory), function(i)
+  boruta_output$ImpHistory[is.finite(boruta_output$ImpHistory[,i]),i])
+axis(1, at=c(1:ncol(boruta_output$ImpHistory)), labels=colnames(boruta_output$ImpHistory), las=2, cex.axis=0.7)
+
+
+# -------------------------------------------------------------------------
+# D. TABEL COMPARATIV FINAL (OLS vs RIDGE vs LASSO) - Cerința 5.b
+# -------------------------------------------------------------------------
+
+# Luăm erorile OLS calculate anterior
+rmse_ols <- RMSE(pred_test, test_data$Cognitive_Score)
+r2_ols   <- R2_Score(pred_test, test_data$Cognitive_Score)
+
+comparison_df <- data.frame(
+  Model = c("OLS Clasic", "Ridge (L2)", "Lasso (L1)"),
+  RMSE_Test = c(rmse_ols, rmse_ridge, rmse_lasso),
+  R2_Test = c(r2_ols, r2_ridge, r2_lasso)
+)
+
+cat("\n=======================================================\n")
+cat(" CLASAMENT FINAL: CINE PREZICE MAI BINE?\n")
+cat("=======================================================\n")
+print(comparison_df)
+cat("=======================================================\n")
+
+
+
+
+#======================OPTIONAL - CLUSTERING ======================================
+
+
+# --- 4. CLUSTERING (K-MEANS OPTIMIZAT & STABIL) ---
+# Vedem dacă există grupuri de performanță (ex: "High Performers" vs "Low Performers")
+
+# Scalăm datele (obligatoriu pentru K-Means)
+df_scaled <- scale(df_final)
+
+set.seed(123)
+
+# Calculăm clusterii folosind algoritmul "MacQueen" pentru a evita eroarea Quick-TRANSfer
+km_res <- kmeans(df_scaled, 
+                 centers = 3, 
+                 nstart = 25, 
+                 iter.max = 100,        # Creștem numărul de iterații
+                 algorithm = "MacQueen") # <--- ASTA REZOLVĂ PROBLEMA
+
+# Vizualizare pe eșantion mic (să nu crape memoria la grafic)
+# Luăm maxim 2000 de puncte pentru desen
+sample_n <- min(2000, nrow(df_scaled))
+sample_idx <- sample(1:nrow(df_scaled), sample_n)
+
+# Pregătim obiectul pentru vizualizare
+km_viz <- list(data = df_scaled[sample_idx, ], cluster = km_res$cluster[sample_idx])
+class(km_viz) <- "kmeans"
+
+# Generăm graficul
+fviz_cluster(km_viz, data = df_scaled[sample_idx, ],
+             palette = "jco", 
+             ggtheme = theme_minimal(), 
+             geom = "point",
+             main = "Tipologii de Performanță Cognitivă")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
